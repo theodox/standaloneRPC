@@ -6,6 +6,16 @@ Cheapass server to control a remote instance of maya.standalone using a bare-bon
 To use as a server, execute this file from the MayaPy interpeter:
 
     mayapy.exe   path/to/standaloneRPC.py
+    
+you can change the port by passing a port number:
+
+    mayapy.exe   path/to/standaloneRPC.py  7575
+    
+you can add a list of passwords as command line arguments too (note this must be
+used with the manual port)
+
+    mayapy.exe   path/to/standaloneRPC.py  8000   password1  password2 password3
+
 
 to connect to a server and issue commands:
 
@@ -14,17 +24,28 @@ to connect to a server and issue commands:
     srpc.send_command(cmd)
     >>> {success:True, result:[u'persp', u'top', u'side', u'front'}
 
-See the CMD class and send_command methods for details.
+if the server has passwords, you need to specify a valid password in the sent command:
 
+    import standaloneRPC as srpc
+    cmd = srpc.CMD('cmds.ls', type='transform', credentials='password1')
+    srpc.send_command(cmd)
+    >>> {success:True, result:[u'persp', u'top', u'side', u'front'}
+
+Trying to query a password protected server without a valid password will result in a HTTP Error 401
+
+See the CMD class and send_command methods for details.
 
 IMPORTANT
 
 This is NOT an attempt at a full-blown rpc server!  It's a quick way for maya users
 to control a maya standalone instance without the commandPort!
 
-As such, this provides NO security so anyone who knew that an instance was
-running will have complete control over the target machine! This is DANGEROUS.
-Do not expose a standlone running this directly to the internet!
+As such, this provides only minimal security. Anyone who knows that an instance is
+running can gain complete control over the target machine! This is DANGEROUS.
+Do not expose a standlone running this directly to the internet!  
+
+The password functionality is not sufficient to protect a server from motivated intruders.  
+Passwords are unencrypted and there is no restriction on what a user can do once they connect.
 
 This also makes no effort to providing proxy services or marshalling - only basic data 
 types can be sent and received. 
@@ -56,6 +77,7 @@ import urllib
 import maya.cmds as cmds
 
 
+_CREDS = []
 
 
 class CMD(str):
@@ -76,7 +98,8 @@ class CMD(str):
         return urllib.urlencode(result)
 
 
-def send_command(cmd, address = '127.0.0.1', port = 8000):
+
+def send_command(cmd, address = '127.0.0.1', port = 8000, credentials = None):
     '''
     send the CMD object 'cmd' to the server at <address>:<port>.  Returns the
     json-decoded results
@@ -108,6 +131,8 @@ def send_command(cmd, address = '127.0.0.1', port = 8000):
     '''
     
     url = "http://{address}:{port}/?{cmd}".format(address = address, port = port, cmd = cmd)
+    if credentials:
+        url += "&cred=%s" % credentials
     q= urllib2.urlopen(url)
     raw = q.read()
     try:
@@ -117,6 +142,56 @@ def send_command(cmd, address = '127.0.0.1', port = 8000):
         raise ValueError ("Could not parse server responss", raw)
                           
 
+def command_check(environ, response):
+    '''
+    Fail if there is no query string
+    '''
+    if not environ.get('QUERY_STRING'):
+        status = '404 Not Found'
+        headers = [('Content-type', 'text/plain')]
+        response(status, headers)
+        return ["You must supply a command as a query string"]
+
+
+def auth_check(environ, response):
+        query = urlparse.parse_qs( environ['QUERY_STRING'] )
+      
+        credentials = query.get('cred', False)
+        if not credentials:
+            status = '401 Unauthorized'
+            headers = [('Content-type', 'text/plain')]
+            response(status, headers)
+            return ['This server requires a password']
+
+        print credentials, _CREDS
+        if not credentials[0] in _CREDS:
+            status = '401 Unauthorized'
+            headers = [('Content-type', 'text/plain')]
+            response(status, headers)
+            return ['Password not recognized']
+
+
+def handle_command_secure(environ, response):
+    '''
+    handle a request with a credential check
+    '''
+    noquery =  command_check(environ, response)
+    if noquery: return noquery 
+    
+    authcheck = auth_check(environ, response)
+    if authcheck: return authcheck
+    
+    return handle_command(environ, response)
+        
+def handle_command_insecure(environ, response):
+    '''
+    handle a request without credential checks
+    '''
+    noquery =  command_check(environ, response)
+    if noquery: return noquery 
+
+    return handle_command(environ, response)
+              
 
 def handle_command  (environ, response):
         '''
@@ -132,12 +207,6 @@ def handle_command  (environ, response):
 
         If the query string command is 'shutdown', quit maya.standalone
         '''
-
-        if not environ.get('QUERY_STRING'):
-            status = '404 Not Found'
-            headers = [('Content-type', 'text/plain')]
-            response(status, headers)
-            return ["You must supply a command as a query string"]
 
         query = urlparse.parse_qs( environ['QUERY_STRING'] )
         status = '200 OK'
@@ -185,19 +254,6 @@ def handle_command  (environ, response):
             return [json.dumps(result_js)]
         
         
-        
-
-                               
-
-def create_server(port=None):
-    '''
-    create a server instance
-    '''
-    port = port or 8000
-    address = socket.gethostbyname(socket.gethostname())
-    server = make_server(address, port, handle_command)    
-    return server, address, port
-
 
 
 #===============================================================================
@@ -206,8 +262,24 @@ def create_server(port=None):
 if __name__ == '__main__':
     import maya.standalone
     maya.standalone.initialize()
-    server_instance, address, port = create_server()       
-
+    port = 8000
+    try:
+        port = int(sys.argv[1])
+    except IndexError:
+        pass
+    try:
+        pwds = sys.argv[2:]
+    except IndexError:
+        pwds = None
+    
+    port = port or 8000
+    address = socket.gethostbyname(socket.gethostname())
+    handler = handle_command_insecure
+    if pwds:
+        _CREDS = pwds
+        handler = handle_command_secure
+    server_instance  = make_server(address, port, handler)    
+    
     # defined here so we don't need a global server reference...    
     def shutdown():
         print  "*" * 80
