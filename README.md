@@ -44,3 +44,8 @@ or
 or 
 
     RPYC    http://rpyc.readthedocs.org/en/latest/
+    
+
+### Update 4/12/14
+
+I've added  a separate branch with minimal password security. It won't stop real hackers but it should suffice to keep your coworkers from pranking you.  Its in the [more secure](https://github.com/theodox/standaloneRPC/tree/more-secure) branch
